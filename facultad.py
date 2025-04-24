@@ -5,6 +5,10 @@ import time
 import logging
 import sys
 import random
+from datetime import datetime
+
+
+from config import TIMEOUTS
 
 # Configuración de logging
 logging.basicConfig(
@@ -36,6 +40,7 @@ class Facultad:
         # Conectar al servidor
         self.socket_servidor.connect(f"tcp://{self.servidor_ip}:{self.servidor_puerto}")
         self.logger.info(f"Facultad {self.nombre} conectada al servidor {self.servidor_ip}:{self.servidor_puerto}")
+        self.logger.info(f"Puerto de la facultad {self.puerto_escucha}")
         
         # Iniciar hilo para simular solicitudes
         threading.Thread(target=self.simular_solicitudes, daemon=True).start()
@@ -69,12 +74,13 @@ class Facultad:
             programa = random.choice(programas)
             
             # Generar solicitud aleatoria
+            # Modificar en el método simular_solicitudes:
             solicitud = {
                 'facultad': self.nombre,
                 'programa': programa,
-                'num_salones': random.randint(1, 5),
-                'num_laboratorios': random.randint(0, 3),
-                'num_aulas_moviles': random.randint(0, 2)
+                'num_salones': random.randint(5, 8),  # Ajustar para que la suma esté entre 7 y 10
+                'num_laboratorios': random.randint(2, 4),
+                'num_aulas_moviles': 0  # Opcional, según necesidad
             }
             
             # Registrar solicitud
@@ -84,23 +90,29 @@ class Facultad:
             self.enviar_solicitud_servidor(solicitud)
     
     def enviar_solicitud_servidor(self, solicitud):
-        """Envía una solicitud al servidor y procesa la respuesta"""
+        """Envía una solicitud al servidor de forma asíncrona"""
         self.logger.info(f"Enviando solicitud al servidor: {solicitud}")
         
+        context = zmq.Context()
+        socket = context.socket(zmq.REQ)
+        socket.setsockopt(zmq.RCVTIMEO, TIMEOUTS['confirmacion'])
+        
         try:
-            # Envío asíncrono
-            self.socket_servidor.send_json(solicitud)
+            socket.connect(f"tcp://{self.servidor_ip}:{self.servidor_puerto}")
+            socket.send_json(solicitud)
             
-            # Esperar respuesta con timeout
-            poller = zmq.Poller()
-            poller.register(self.socket_servidor, zmq.POLLIN)
-            if poller.poll(5000):  # Timeout de 5 segundos
-                respuesta = self.socket_servidor.recv_json()
-                self.confirmar_recepcion(respuesta)
-            else:
-                self.logger.warning("Timeout al esperar respuesta del servidor")
+            # Esperar respuesta
+            respuesta = socket.recv_json()
+            self.confirmar_recepcion(respuesta)
+            
+        except zmq.Again:
+            self.logger.warning("Timeout al esperar respuesta del servidor")
+            # Lógica de reintento podría ir aquí
         except Exception as e:
             self.logger.error(f"Error al comunicarse con el servidor: {e}")
+        finally:
+            socket.close()
+            context.term()
     
     def confirmar_recepcion(self, respuesta):
         """Procesa la respuesta recibida del servidor"""
@@ -118,7 +130,7 @@ class Facultad:
             self.logger.info(f"Recursos asignados a {programa}:")
             self.logger.info(f"  - Salones: {len(asignacion.get('salones', []))} ({', '.join(asignacion.get('salones', []))})")
             self.logger.info(f"  - Laboratorios: {len(asignacion.get('laboratorios', []))} ({', '.join(asignacion.get('laboratorios', []))})")
-            self.logger.info(f"  - Aulas Móviles: {len(asignacion.get('aulas_moviles', []))} ({', '.join(asignacion.get('aulas_moviles', []))})")
+            self.logger.info(f"  - Aulas Móviles: {len(asignacion.get('aulas_moviles', []))} ({', '.join(asignacion.get('aulas_moviles', []))}")
             
             # Verificar recursos no asignados
             no_asignados = asignacion.get('no_asignados', {})
