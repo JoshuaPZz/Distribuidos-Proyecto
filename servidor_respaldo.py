@@ -20,14 +20,16 @@ class RespaldoHealthChecker:
         self.puerto_respaldo = puerto_respaldo
         self.puerto_control = puerto_control
         self.puerto_proxy = puerto_proxy
-        self.estado = "pasivo"  # "pasivo" o "activo"
+        self.estado = "pasivo"
         self.fallos_consecutivos = 0
         self.max_fallos = 3
         self.servidor_activo = f"tcp://{self.ip_principal}:{self.puerto_principal}"
         self.proxy_activo = False
         self.context = zmq.Context()
         self.socket_principal = self.context.socket(zmq.REQ)
+        self.socket_principal.connect(f"tcp://{self.ip_principal}:{self.puerto_principal}")
         self.socket_respaldo = self.context.socket(zmq.REP)
+        self.socket_control = self.context.socket(zmq.REP)
         self.salones = [f"S{i}" for i in range(1, 381)]
         self.laboratorios = [f"L{i}" for i in range(1, 61)]
         self.aulas_moviles = [f"AM{i}" for i in range(1, 6)]
@@ -41,25 +43,7 @@ class RespaldoHealthChecker:
         self.lock_aulas_moviles = threading.Lock()
         self.archivo_solicitudes = "solicitudes.json"
         self.archivo_no_atendidas = "solicitudes_no_atendidas.json"
-        self.socket_control = self.context.socket(zmq.REP)
         self._cargar_datos()
-    
-    def iniciar_control(self):
-        self.socket_control.bind(f"tcp://*:{self.puerto_control}")
-        self.logger.info(f"Control de respaldo iniciado en puerto {self.puerto_control}")
-        while self.estado == "pasivo":
-            try:
-                mensaje = self.socket_control.recv_json()
-                if mensaje.get("comando") == "activar":
-                    self.estado = "activo"
-                    self.socket_control.send_json({"estado": "activado"})
-                    self.iniciar_respaldo()
-                    break
-            except zmq.error.Again:
-                continue
-            except Exception as e:
-                self.logger.error(f"Error en puerto de control: {e}")
-        self.socket_control.close()
 
     def _cargar_datos(self):
         try:
@@ -82,6 +66,7 @@ class RespaldoHealthChecker:
             self.logger.error(f"Error guardando datos: {e}")
 
     def asignar_recursos(self, num_salones, num_laboratorios, num_aulas_moviles):
+        # Código sin cambios (igual al original)...
         id_solicitud = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{threading.get_ident()}"
         salones_asignados = []
         laboratorios_asignados = []
@@ -202,7 +187,6 @@ class RespaldoHealthChecker:
 
     def verificar_servidor(self):
         self.socket_principal.setsockopt(zmq.RCVTIMEO, 1000)
-        self.socket_principal.connect(f"tcp://{self.ip_principal}:{self.puerto_principal}")
         try:
             self.socket_principal.send_json({"comando": "ping"})
             respuesta = self.socket_principal.recv_json()
@@ -213,8 +197,6 @@ class RespaldoHealthChecker:
             self.fallos_consecutivos += 1
             self.logger.warning(f"Fallo detectado en servidor principal ({self.fallos_consecutivos}/{self.max_fallos})")
             return False
-        finally:
-            self.socket_principal.disconnect(f"tcp://{self.ip_principal}:{self.puerto_principal}")
 
     def proxy(self):
         frontend = self.context.socket(zmq.ROUTER)
@@ -242,14 +224,24 @@ class RespaldoHealthChecker:
             except Exception as e:
                 self.logger.error(f"Error procesando solicitud: {e}")
 
-    def iniciar(self):
-        threading.Thread(target=self.iniciar_control, daemon=True).start()
-        # Iniciar proxy en un hilo separado
-        proxy_thread = threading.Thread(target=self.proxy)
-        proxy_thread.daemon = True
-        proxy_thread.start()
-        self.proxy_activo = True
+    def iniciar_control(self):
+        self.socket_control.bind(f"tcp://*:{self.puerto_control}")
+        self.logger.info(f"Control de respaldo iniciado en puerto {self.puerto_control}")
+        while self.estado == "pasivo":
+            try:
+                mensaje = self.socket_control.recv_json()
+                if mensaje.get("comando") == "activar":
+                    self.estado = "activo"
+                    self.socket_control.send_json({"estado": "activado"})
+                    self.iniciar_respaldo()
+                    break
+            except zmq.error.Again:
+                continue
+            except Exception as e:
+                self.logger.error(f"Error en puerto de control: {e}")
+        self.socket_control.close()
 
+    def verificar_periodicamente(self):
         while self.estado == "pasivo":
             if not self.verificar_servidor():
                 if self.fallos_consecutivos >= self.max_fallos:
@@ -257,7 +249,7 @@ class RespaldoHealthChecker:
                     self.estado = "activo"
                     self.servidor_activo = f"tcp://localhost:{self.puerto_respaldo}"
                     self.proxy_activo = False
-                    time.sleep(1)  # Esperar a que el proxy anterior termine
+                    time.sleep(1)
                     proxy_thread = threading.Thread(target=self.proxy)
                     proxy_thread.daemon = True
                     proxy_thread.start()
@@ -266,9 +258,26 @@ class RespaldoHealthChecker:
                     break
             time.sleep(2)
 
+    def iniciar(self):
+        threading.Thread(target=self.iniciar_control, daemon=True).start()
+        threading.Thread(target=self.verificar_periodicamente, daemon=True).start()
+        proxy_thread = threading.Thread(target=self.proxy)
+        proxy_thread.daemon = True
+        proxy_thread.start()
+        self.proxy_activo = True
+        while True:
+            time.sleep(1)
+
 if __name__ == "__main__":
+    import sys
+    if len(sys.argv) != 6:
+        print("Uso: python3 servidor_respaldo.py <ip_principal> <puerto_principal> <puerto_respaldo> <puerto_control> <puerto_proxy>")
+        sys.exit(1)
     checker = RespaldoHealthChecker(
-        ip_principal="", puerto_principal=5555,
-        puerto_respaldo=5556, puerto_proxy=5558
+        ip_principal=sys.argv[1],
+        puerto_principal=int(sys.argv[2]),
+        puerto_respaldo=int(sys.argv[3]),
+        puerto_control=int(sys.argv[4]),
+        puerto_proxy=int(sys.argv[5])
     )
     checker.iniciar()
