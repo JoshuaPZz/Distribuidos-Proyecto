@@ -230,25 +230,34 @@ class RespaldoHealthChecker:
     def cerrar_proxy(self):
         """Cierra los sockets del proxy si están activos."""
         if self.proxy_frontend:
-            self.proxy_frontend.close()
+            try:
+                self.proxy_frontend.close(linger=0)
+                self.logger.info("Proxy frontend cerrado")
+            except Exception as e:
+                self.logger.error(f"Error cerrando proxy frontend: {e}")
             self.proxy_frontend = None
         if self.proxy_backend:
-            self.proxy_backend.close()
+            try:
+                self.proxy_backend.close(linger=0)
+                self.logger.info("Proxy backend cerrado")
+            except Exception as e:
+                self.logger.error(f"Error cerrando proxy backend: {e}")
             self.proxy_backend = None
         self.proxy_activo = False
         self.logger.info("Proxy cerrado correctamente")
+        time.sleep(1)  # Retardo para liberar el puerto
 
     def proxy(self):
         if self.proxy_activo:
             self.logger.warning("Proxy ya está activo, cerrando el anterior antes de iniciar uno nuevo")
             self.cerrar_proxy()
         
-        self.proxy_frontend = None
-        self.proxy_backend = None
         try:
             self.proxy_frontend = self.context.socket(zmq.ROUTER)
+            self.proxy_frontend.setsockopt(zmq.LINGER, 0)
             self.proxy_frontend.bind(f"tcp://*:{self.puerto_proxy}")
             self.proxy_backend = self.context.socket(zmq.DEALER)
+            self.proxy_backend.setsockopt(zmq.LINGER, 0)
             self.proxy_backend.bind("inproc://respaldo_workers")
             self.logger.info(f"Proxy de respaldo iniciado en puerto {self.puerto_proxy}, redirigiendo a trabajadores")
             self.proxy_activo = True
@@ -256,20 +265,13 @@ class RespaldoHealthChecker:
                 threading.Thread(target=self.trabajador, args=("inproc://respaldo_workers",), daemon=True).start()
             zmq.proxy(self.proxy_frontend, self.proxy_backend)
         except zmq.ZMQError as e:
+            self.logger.error(f"Error al iniciar proxy: {e}")
             if e.errno == zmq.EADDRINUSE:
                 self.logger.error(f"El puerto {self.puerto_proxy} ya está en uso. Cambia el puerto o libera el actual.")
-            else:
-                self.logger.error(f"Error al iniciar proxy: {e}")
         except Exception as e:
             self.logger.error(f"Error inesperado en proxy: {e}")
         finally:
-            if self.proxy_frontend:
-                self.proxy_frontend.close()
-                self.proxy_frontend = None
-            if self.proxy_backend:
-                self.proxy_backend.close()
-                self.proxy_backend = None
-            self.proxy_activo = False
+            self.cerrar_proxy()
 
     def procesar_solicitud_hilo(self, mensaje):
         respuesta = self.procesar_solicitud(mensaje)
@@ -368,4 +370,4 @@ if __name__ == "__main__":
         puerto_control=int(sys.argv[4]),
         puerto_proxy=int(sys.argv[5])
     )
-    checker.iniciar() 
+    checker.iniciar()
