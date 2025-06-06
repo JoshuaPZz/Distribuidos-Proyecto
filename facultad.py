@@ -16,11 +16,12 @@ logging.basicConfig(
 )
 
 class Facultad:
-    def __init__(self, nombre, servidor_ip="localhost", servidor_puerto=5555, puerto_escucha=None):
+    def __init__(self, nombre, servidor_ip="localhost", servidor_puerto=5555, puerto_respaldo=5556, puerto_escucha=None):
         self.logger = logging.getLogger(f'Facultad-{nombre}')
         self.nombre = nombre
         self.servidor_ip = servidor_ip
         self.servidor_puerto = servidor_puerto
+        self.puerto_respaldo = puerto_respaldo
         self.puerto_escucha = puerto_escucha or (6000 + random.randint(1, 999))
         
         # Almacenamiento de solicitudes y respuestas
@@ -30,24 +31,34 @@ class Facultad:
         # Configuración ZMQ para comunicación con el servidor y programas
         self.context_servidor = zmq.Context()
         self.socket_servidor = self.context_servidor.socket(zmq.REQ)
-        self.socket_pub = self.context_servidor.socket(zmq.PUB)  # Para notificar a programas
+        self.socket_pub = self.context_servidor.socket(zmq.PUB)
         self.socket_pub.bind(f"tcp://*:{self.puerto_escucha}")
+        
+        # Estado del servidor activo
+        self.servidor_activo = f"tcp://{self.servidor_ip}:{self.servidor_puerto}"
+        self.fallos_consecutivos = 0
+        self.max_fallos = 3
         
         # Flag para controlar el ciclo de ejecución
         self.ejecutando = True
     
+    def conectar_servidor(self):
+        """Conecta o reconecta al servidor activo."""
+        self.socket_servidor.close()
+        self.socket_servidor = self.context_servidor.socket(zmq.REQ)
+        self.socket_servidor.setsockopt(zmq.RCVTIMEO, TIMEOUTS['confirmacion'])
+        self.socket_servidor.connect(self.servidor_activo)
+        self.logger.info(f"Conectado al servidor {self.servidor_activo}")
+
     def iniciar(self):
         """Inicia la facultad y se conecta con el servidor"""
-        # Conectar al servidor
-        self.socket_servidor.connect(f"tcp://{self.servidor_ip}:{self.servidor_puerto}")
-        self.logger.info(f"Facultad {self.nombre} conectada al servidor {self.servidor_ip}:{self.servidor_puerto}")
-        self.logger.info(f"Puerto de la facultad {self.puerto_escucha}")
+        self.conectar_servidor()
+        self.logger.info(f"Facultad {self.nombre} iniciada. Puerto de escucha: {self.puerto_escucha}")
         
         # Iniciar hilo para simular solicitudes
         threading.Thread(target=self.simular_solicitudes, daemon=True).start()
         
         try:
-            # En esta versión simplificada, simplemente esperamos
             while self.ejecutando:
                 time.sleep(1)
         except KeyboardInterrupt:
@@ -84,24 +95,32 @@ class Facultad:
     
     def enviar_solicitud_servidor(self, solicitud):
         inicio = time.time()
-        context = zmq.Context()
-        socket = context.socket(zmq.REQ)
-        socket.setsockopt(zmq.RCVTIMEO, TIMEOUTS['confirmacion'])
-        socket.connect(f"tcp://{self.servidor_ip}:{self.servidor_puerto}")
-        socket.send_json(solicitud)
+        self.socket_servidor.send_json(solicitud)
         try:
-            respuesta = socket.recv_json()
+            respuesta = self.socket_servidor.recv_json()
             fin = time.time()
             tiempo_respuesta = fin - inicio
+            self.fallos_consecutivos = 0  # Reiniciar contador de fallos
             self.confirmar_recepcion(respuesta)
             exito = respuesta.get('asignacion', {}).get('no_asignados') is None
             with open("metricas_facultad.txt", "a") as f:
                 f.write(f"{solicitud['programa']},{tiempo_respuesta},{exito}\n")
         except zmq.Again:
             self.logger.warning("Timeout al esperar respuesta del servidor")
-        finally:
-            socket.close()
-            context.term()
+            self.fallos_consecutivos += 1
+            if self.fallos_consecutivos >= self.max_fallos and self.servidor_activo.endswith(f":{self.servidor_puerto}"):
+                self.logger.warning("Cambiando al servidor de respaldo")
+                self.servidor_activo = f"tcp://{self.servidor_ip}:{self.puerto_respaldo}"
+                self.conectar_servidor()
+                self.fallos_consecutivos = 0
+        except Exception as e:
+            self.logger.error(f"Error enviando solicitud: {e}")
+            self.fallos_consecutivos += 1
+            if self.fallos_consecutivos >= self.max_fallos and self.servidor_activo.endswith(f":{self.servidor_puerto}"):
+                self.logger.warning("Cambiando al servidor de respaldo")
+                self.servidor_activo = f"tcp://{self.servidor_ip}:{self.puerto_respaldo}"
+                self.conectar_servidor()
+                self.fallos_consecutivos = 0
     
     def guardar_respuesta(self, respuesta, semestre="2025-10"):
         archivo = f"respuestas_{self.nombre}_{semestre}.json"
