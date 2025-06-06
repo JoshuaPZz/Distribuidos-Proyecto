@@ -94,11 +94,11 @@ class Facultad:
             self.socket_pub.send_string(f"programa_{programa} {json.dumps(solicitud)}")
             self.enviar_solicitud_servidor(solicitud)
     
-    def enviar_solicitud(self, solicitud):
+    def enviar_solicitud_servidor(self, solicitud):
         inicio = time.time()
         try:
             self.socket_servidor.send_json(solicitud)
-            respuesta = self.socket_respuesta_respuesta.recv_json()
+            respuesta = self.socket_servidor.recv_json()  # Corregir aquí
             fin = time.time()
             tiempo_respuesta = fin - inicio
             self.fallos_consecutivos = 0  # Reiniciar contador de fallos
@@ -109,22 +109,22 @@ class Facultad:
         except zmq.Again:
             self.logger.warning("Timeout al esperar respuesta del servidor")
             self.fallos_consecutivos += 1
-            self.conectar_servidor()  # Reinicia el socket
+            self.conectar_servidor()
             if self.fallos_consecutivos >= self.max_fallos and self.servidor_activo.endswith(f":{self.servidor_puerto}"):
                 self.logger.warning("Cambiando al servidor de respaldo")
-                self.servidor_activo = f"tcp://{self.respaldo_ip}:{self.puerto_respaldo}"  # Usar respaldo_ip y 5558
+                self.servidor_activo = f"tcp://{self.respaldo_ip}:{self.puerto_respaldo}"
                 self.conectar_servidor()
                 self.fallos_consecutivos = 0
         except zmq.ZMQError as e:
             self.logger.error(f"Error enviando solicitud: {e}")
             self.fallos_consecutivos += 1
-            self.conectar_servidor()  # Reinicia el socket
+            self.conectar_servidor()
             if self.fallos_consecutivos >= self.max_fallos and self.servidor_activo.endswith(f":{self.servidor_puerto}"):
                 self.logger.warning("Cambiando al servidor de respaldo")
-                self.servidor_activo = f"tcp://{self.respaldo_ip}:{self.puerto_respaldo}"  # Usar respaldo_ip y 5558
+                self.servidor_activo = f"tcp://{self.respaldo_ip}:{self.puerto_respaldo}"
                 self.conectar_servidor()
                 self.fallos_consecutivos = 0
-    
+            
     def guardar_respuesta(self, respuesta, semestre="2025-10"):
         archivo = f"respuestas_{self.nombre}_{semestre}.json"
         try:
