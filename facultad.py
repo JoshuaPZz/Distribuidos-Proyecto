@@ -16,11 +16,12 @@ logging.basicConfig(
 )
 
 class Facultad:
-    def __init__(self, nombre, servidor_ip="localhost", servidor_puerto=5555, puerto_respaldo=5556, puerto_escucha=None):
+    def __init__(self, nombre, servidor_ip="localhost", servidor_puerto=5555, respaldo_ip="localhost", puerto_respaldo=5558, puerto_escucha=None):
         self.logger = logging.getLogger(f'Facultad-{nombre}')
         self.nombre = nombre
         self.servidor_ip = servidor_ip
         self.servidor_puerto = servidor_puerto
+        self.respaldo_ip = respaldo_ip
         self.puerto_respaldo = puerto_respaldo
         self.puerto_escucha = puerto_escucha or (6000 + random.randint(1, 999))
         
@@ -34,7 +35,7 @@ class Facultad:
         self.socket_pub = self.context_servidor.socket(zmq.PUB)
         self.socket_pub.bind(f"tcp://*:{self.puerto_escucha}")
         
-        # Estado del servidor activo
+        # Iniciar del servidor activo
         self.servidor_activo = f"tcp://{self.servidor_ip}:{self.servidor_puerto}"
         self.fallos_consecutivos = 0
         self.max_fallos = 3
@@ -93,11 +94,11 @@ class Facultad:
             self.socket_pub.send_string(f"programa_{programa} {json.dumps(solicitud)}")
             self.enviar_solicitud_servidor(solicitud)
     
-    def enviar_solicitud_servidor(self, solicitud):
+    def enviar_solicitud(self, solicitud):
         inicio = time.time()
         try:
             self.socket_servidor.send_json(solicitud)
-            respuesta = self.socket_servidor.recv_json()
+            respuesta = self.socket_respuesta_respuesta.recv_json()
             fin = time.time()
             tiempo_respuesta = fin - inicio
             self.fallos_consecutivos = 0  # Reiniciar contador de fallos
@@ -111,7 +112,7 @@ class Facultad:
             self.conectar_servidor()  # Reinicia el socket
             if self.fallos_consecutivos >= self.max_fallos and self.servidor_activo.endswith(f":{self.servidor_puerto}"):
                 self.logger.warning("Cambiando al servidor de respaldo")
-                self.servidor_activo = f"tcp://{self.servidor_ip}:{self.puerto_respaldo}"
+                self.servidor_activo = f"tcp://{self.respaldo_ip}:{self.puerto_respaldo}"  # Usar respaldo_ip y 5558
                 self.conectar_servidor()
                 self.fallos_consecutivos = 0
         except zmq.ZMQError as e:
@@ -120,7 +121,7 @@ class Facultad:
             self.conectar_servidor()  # Reinicia el socket
             if self.fallos_consecutivos >= self.max_fallos and self.servidor_activo.endswith(f":{self.servidor_puerto}"):
                 self.logger.warning("Cambiando al servidor de respaldo")
-                self.servidor_activo = f"tcp://{self.servidor_ip}:{self.puerto_respaldo}"
+                self.servidor_activo = f"tcp://{self.respaldo_ip}:{self.puerto_respaldo}"  # Usar respaldo_ip y 5558
                 self.conectar_servidor()
                 self.fallos_consecutivos = 0
     

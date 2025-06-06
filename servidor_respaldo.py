@@ -232,14 +232,12 @@ class RespaldoHealthChecker:
         if self.proxy_frontend:
             try:
                 self.proxy_frontend.close(linger=0)
-                self.logger.info("Proxy frontend cerrado")
             except Exception as e:
                 self.logger.error(f"Error cerrando proxy frontend: {e}")
             self.proxy_frontend = None
         if self.proxy_backend:
             try:
                 self.proxy_backend.close(linger=0)
-                self.logger.info("Proxy backend cerrado")
             except Exception as e:
                 self.logger.error(f"Error cerrando proxy backend: {e}")
             self.proxy_backend = None
@@ -281,21 +279,23 @@ class RespaldoHealthChecker:
         if self.estado != "activo":
             self.logger.warning("Intento de iniciar respaldo en estado no activo")
             return
-        try:
-            self.socket_respaldo.bind(f"tcp://*:{self.puerto_respaldo}")
-            self.logger.info(f"Servidor de respaldo iniciado en puerto {self.puerto_respaldo}")
-            self.socket_respaldo.setsockopt(zmq.RCVTIMEO, 1000)
-            while self.estado == "activo":
-                try:
-                    mensaje = self.socket_respaldo.recv_json()
-                    self.logger.info(f"Solicitud recibida en respaldo: {mensaje}")
-                    threading.Thread(target=self.procesar_solicitud_hilo, args=(mensaje,), daemon=True).start()
-                except zmq.error.Again:
-                    continue
-                except Exception as e:
-                    self.logger.error(f"Error procesando solicitud en respaldo: {e}")
-        except zmq.ZMQError as e:
-            self.logger.error(f"Error al bindear socket de respaldo: {e}")
+        self.logger.info("Servidor de respaldo activo, usando proxy en puerto 5558")
+
+    def verificar_periodicamente(self):
+        while self.estado == "pasivo":
+            if not self.verificar_servidor():
+                if self.fallos_consecutivos >= self.max_fallos:
+                    self.logger.warning("Servidor principal no responde, activando modo respaldo")
+                    self.estado = "activo"
+                    self.servidor_activo = f"tcp://{self.ip_principal}:5558"
+                    self.cerrar_proxy()
+                    time.sleep(1)
+                    proxy_thread = threading.Thread(target=self.proxy)
+                    proxy_thread.daemon = True
+                    proxy_thread.start()
+                    self.proxy_thread = proxy_thread
+                    break
+            time.sleep(2)
 
     def iniciar_control(self):
         try:
@@ -314,23 +314,6 @@ class RespaldoHealthChecker:
             self.logger.error(f"Error en puerto de control: {e}")
         finally:
             self.socket_control.close()
-
-    def verificar_periodicamente(self):
-        while self.estado == "pasivo":
-            if not self.verificar_servidor():
-                if self.fallos_consecutivos >= self.max_fallos:
-                    self.logger.warning("Servidor principal no responde, activando modo respaldo")
-                    self.estado = "activo"
-                    self.servidor_activo = f"tcp://localhost:{self.puerto_respaldo}"
-                    self.cerrar_proxy()  # Cierra el proxy existente antes de iniciar uno nuevo
-                    time.sleep(1)
-                    proxy_thread = threading.Thread(target=self.proxy)
-                    proxy_thread.daemon = True
-                    proxy_thread.start()
-                    self.proxy_thread = proxy_thread
-                    self.iniciar_respaldo()
-                    break
-            time.sleep(2)  # Retraso entre verificaciones
 
     def iniciar(self):
         threading.Thread(target=self.iniciar_control, daemon=True).start()
