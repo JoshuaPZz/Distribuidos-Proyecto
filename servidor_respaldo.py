@@ -26,8 +26,13 @@ class RespaldoHealthChecker:
         self.servidor_activo = f"tcp://{self.ip_principal}:{self.puerto_principal}"
         self.proxy_activo = False
         self.context = zmq.Context()
+        
+        # Inicializar todos los sockets
         self.socket_principal = self.context.socket(zmq.REQ)
         self.socket_principal.connect(f"tcp://{self.ip_principal}:{self.puerto_principal}")
+        self.socket_respaldo = self.context.socket(zmq.REP)
+        self.socket_control = self.context.socket(zmq.REP)
+        
         self.salones = [f"S{i}" for i in range(1, 381)]
         self.laboratorios = [f"L{i}" for i in range(1, 61)]
         self.aulas_moviles = [f"AM{i}" for i in range(1, 6)]
@@ -218,52 +223,69 @@ class RespaldoHealthChecker:
                 self.logger.error(f"Error en trabajador de respaldo: {e}")
 
     def proxy(self):
-        frontend = self.context.socket(zmq.ROUTER)
-        backend = self.context.socket(zmq.DEALER)
-        frontend.bind(f"tcp://*:{self.puerto_proxy}")
-        backend.bind("inproc://respaldo_workers")
-        self.logger.info(f"Proxy de respaldo iniciado en puerto {self.puerto_proxy}, redirigiendo a trabajadores")
-
-        # Iniciar trabajadores para el respaldo
-        for i in range(3):  # Menor número de trabajadores para respaldo
-            threading.Thread(target=self.trabajador, args=("inproc://respaldo_workers",), daemon=True).start()
-
-        zmq.proxy(frontend, backend)
+        if self.proxy_activo:
+            self.logger.warning("Proxy ya está activo, no se iniciará de nuevo")
+            return
+        try:
+            frontend = self.context.socket(zmq.ROUTER)
+            frontend.bind(f"tcp://*:{self.puerto_proxy}")
+            backend = self.context.socket(zmq.DEALER)
+            backend.bind("inproc://respaldo_workers")
+            self.logger.info(f"Proxy de respaldo iniciado en puerto {self.puerto_proxy}, redirigiendo a trabajadores")
+            self.proxy_activo = True
+            for i in range(3):
+                threading.Thread(target=self.trabajador, args=("inproc://respaldo_workers",), daemon=True).start()
+            zmq.proxy(frontend, backend)
+        except zmq.ZMQError as e:
+            if e.errno == zmq.EADDRINUSE:
+                self.logger.error(f"El puerto {self.puerto_proxy} ya está en uso. Cambia el puerto o libera el actual.")
+            else:
+                self.logger.error(f"Error al iniciar proxy: {e}")
+        finally:
+            frontend.close()
+            backend.close()
 
     def procesar_solicitud_hilo(self, mensaje):
         respuesta = self.procesar_solicitud(mensaje)
         self.socket_respaldo.send_json(respuesta)
 
     def iniciar_respaldo(self):
-        self.socket_respaldo.bind(f"tcp://*:{self.puerto_respaldo}")
-        self.logger.info(f"Servidor de respaldo iniciado en puerto {self.puerto_respaldo}")
-        self.socket_respaldo.setsockopt(zmq.RCVTIMEO, 1000)
-        while self.estado == "activo":
-            try:
-                mensaje = self.socket_respaldo.recv_json()
-                self.logger.info(f"Solicitud recibida en respaldo: {mensaje}")
-                threading.Thread(target=self.procesar_solicitud_hilo, args=(mensaje,), daemon=True).start()
-            except zmq.error.Again:
-                continue
-            except Exception as e:
-                self.logger.error(f"Error procesando solicitud en respaldo: {e}")
+        if self.estado != "activo":
+            self.logger.warning("Intento de iniciar respaldo en estado no activo")
+            return
+        try:
+            self.socket_respaldo.bind(f"tcp://*:{self.puerto_respaldo}")
+            self.logger.info(f"Servidor de respaldo iniciado en puerto {self.puerto_respaldo}")
+            self.socket_respaldo.setsockopt(zmq.RCVTIMEO, 1000)
+            while self.estado == "activo":
+                try:
+                    mensaje = self.socket_respaldo.recv_json()
+                    self.logger.info(f"Solicitud recibida en respaldo: {mensaje}")
+                    threading.Thread(target=self.procesar_solicitud_hilo, args=(mensaje,), daemon=True).start()
+                except zmq.error.Again:
+                    continue
+                except Exception as e:
+                    self.logger.error(f"Error procesando solicitud en respaldo: {e}")
+        except zmq.ZMQError as e:
+            self.logger.error(f"Error al bindear socket de respaldo: {e}")
 
     def iniciar_control(self):
-        self.socket_control.bind(f"tcp://*:{self.puerto_control}")
-        self.logger.info(f"Control de respaldo iniciado en puerto {self.puerto_control}")
-        while self.estado == "pasivo":
-            try:
+        try:
+            self.socket_control.bind(f"tcp://*:{self.puerto_control}")
+            self.logger.info(f"Control de respaldo iniciado en puerto {self.puerto_control}")
+            while self.estado == "pasivo":
                 mensaje = self.socket_control.recv_json()
                 if mensaje.get("comando") == "activar":
                     self.estado = "activo"
                     self.socket_control.send_json({"estado": "activado"})
                     self.iniciar_respaldo()
                     break
-            except zmq.error.Again:
-                continue
-            except Exception as e:
-                self.logger.error(f"Error en puerto de control: {e}")
-        self.socket_control.close()
+        except zmq.error.Again:
+            pass
+        except Exception as e:
+            self.logger.error(f"Error en puerto de control: {e}")
+        finally:
+            self.socket_control.close()
 
     def verificar_periodicamente(self):
         while self.estado == "pasivo":

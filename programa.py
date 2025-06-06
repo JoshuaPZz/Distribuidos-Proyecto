@@ -3,7 +3,6 @@ import json
 import logging
 import sys
 import time
-import random
 
 # Configuración de logging
 logging.basicConfig(
@@ -18,24 +17,21 @@ class ProgramaAcademico:
         self.facultad_ip = facultad_ip
         self.facultad_puerto = facultad_puerto
         
-        # Configuración ZMQ
+        # Configuración ZMQ para comunicación con la facultad
         self.context = zmq.Context()
-        self.socket = self.context.socket(zmq.REQ)
-        self.socket.connect(f"tcp://{facultad_ip}:{facultad_puerto}")
+        self.socket_facultad = self.context.socket(zmq.REQ)
+        self.socket_facultad.connect(f"tcp://{facultad_ip}:{facultad_puerto}")
+        
+        # Socket para recibir notificaciones de la facultad (SUB)
+        self.socket_sub = self.context.socket(zmq.SUB)
+        self.socket_sub.connect(f"tcp://{facultad_ip}:{facultad_puerto}")
+        self.socket_sub.setsockopt_string(zmq.SUBSCRIBE, f"programa_{nombre}")
     
-    def enviar_solicitud(self, num_salones=None, num_laboratorios=None):
+    def enviar_solicitud(self, solicitud):
         inicio = time.time()
-        solicitud = {
-            'programa': self.nombre,
-            'num_salones': num_salones or random.randint(3, 8),
-            'num_laboratorios': num_laboratorios or random.randint(2, 4)
-        }
-        while solicitud['num_salones'] + solicitud['num_laboratorios'] < 7 or solicitud['num_salones'] + solicitud['num_laboratorios'] > 10:
-            solicitud['num_salones'] = random.randint(3, 8)
-            solicitud['num_laboratorios'] = random.randint(2, 4)
         self.logger.info(f"Enviando solicitud a facultad: {solicitud}")
-        self.socket.send_json(solicitud)
-        respuesta = self.socket.recv_json()
+        self.socket_facultad.send_json(solicitud)
+        respuesta = self.socket_facultad.recv_json()
         fin = time.time()
         tiempo_respuesta = fin - inicio
         self.logger.info(f"Respuesta recibida: {respuesta}")
@@ -55,6 +51,18 @@ class ProgramaAcademico:
         except Exception as e:
             self.logger.error(f"Error al guardar respuesta: {e}")
 
+    def recibir_notificacion(self):
+        """Recibe notificaciones de la facultad sobre nuevas solicitudes."""
+        while True:
+            try:
+                topic, mensaje = self.socket_sub.recv_string().split(" ", 1)
+                solicitud = json.loads(mensaje)
+                self.logger.info(f"Recibida notificación de solicitud para {self.nombre}: {solicitud}")
+                return solicitud
+            except Exception as e:
+                self.logger.error(f"Error recibiendo notificación: {e}")
+                time.sleep(1)
+
 if __name__ == "__main__":
     if len(sys.argv) < 4:
         print("Uso: python programa.py <nombre> <facultad_ip> <facultad_puerto>")
@@ -66,10 +74,9 @@ if __name__ == "__main__":
     
     programa = ProgramaAcademico(nombre, facultad_ip, facultad_puerto)
     
-    # Ejemplo: enviar solicitud cada 10 segundos
+    # Bucle principal: recibe notificaciones de la facultad y envía solicitudes
     while True:
-        programa.enviar_solicitud(
-            num_salones=random.randint(5, 8),  
-            num_laboratorios=random.randint(2, 4)
-        )
-        time.sleep(10)
+        solicitud = programa.recibir_notificacion()
+        if solicitud and solicitud.get('programa') == nombre:
+            programa.enviar_solicitud(solicitud)
+        time.sleep(1)  # Pequeña pausa para evitar consumo excesivo de CPU

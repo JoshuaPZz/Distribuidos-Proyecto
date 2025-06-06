@@ -7,7 +7,6 @@ import sys
 import random
 from datetime import datetime
 
-
 from config import TIMEOUTS
 
 # Configuración de logging
@@ -28,9 +27,11 @@ class Facultad:
         self.programas_solicitudes = {}
         self.respuestas_asignaciones = {}
         
-        # Configuración ZMQ para comunicación con el servidor
+        # Configuración ZMQ para comunicación con el servidor y programas
         self.context_servidor = zmq.Context()
         self.socket_servidor = self.context_servidor.socket(zmq.REQ)
+        self.socket_pub = self.context_servidor.socket(zmq.PUB)  # Para notificar a programas
+        self.socket_pub.bind(f"tcp://*:{self.puerto_escucha}")
         
         # Flag para controlar el ciclo de ejecución
         self.ejecutando = True
@@ -54,6 +55,7 @@ class Facultad:
             self.logger.info(f"Facultad {self.nombre} detenida")
         finally:
             self.socket_servidor.close()
+            self.socket_pub.close()
             self.context_servidor.term()
     
     def simular_solicitudes(self):
@@ -76,6 +78,8 @@ class Facultad:
                 'num_aulas_moviles': 0
             }
             self.programas_solicitudes[programa] = solicitud
+            # Notificar al programa correspondiente
+            self.socket_pub.send_string(f"programa_{programa} {json.dumps(solicitud)}")
             self.enviar_solicitud_servidor(solicitud)
     
     def enviar_solicitud_servidor(self, solicitud):
