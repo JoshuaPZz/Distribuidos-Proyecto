@@ -2,7 +2,6 @@ from pathlib import Path
 import zmq
 import json
 import threading
-import time
 import logging
 from datetime import datetime
 
@@ -13,9 +12,11 @@ logging.basicConfig(
 )
 
 class ServidorCentral:
-    def __init__(self, puerto_escucha=5555):
+    def __init__(self, puerto_escucha=5555, num_trabajadores=5):
         self.logger = logging.getLogger('ServidorCentral')
         self.puerto_escucha = puerto_escucha
+        self.num_trabajadores = num_trabajadores
+        self.context = zmq.Context()
         self.salones = [f"S{i}" for i in range(1, 381)]  # 380 salones
         self.laboratorios = [f"L{i}" for i in range(1, 61)]  # 60 laboratorios
         self.aulas_moviles = [f"AM{i}" for i in range(1, 6)]  # 5 aulas móviles
@@ -24,11 +25,7 @@ class ServidorCentral:
         self.aulas_moviles_asignados = []
         self.solicitudes = {}
         self.solicitudes_no_atendidas = {}
-        self.lock_salones = threading.Lock()
-        self.lock_laboratorios = threading.Lock()
-        self.lock_aulas_moviles = threading.Lock()
-        self.context = zmq.Context()
-        self.socket = self.context.socket(zmq.REP)
+        self.lock = threading.Lock()  # Para sincronizar acceso a recursos compartidos
         self.archivo_solicitudes = "solicitudes.json"
         self.archivo_no_atendidas = "solicitudes_no_atendidas.json"
         self._cargar_datos()
@@ -61,7 +58,7 @@ class ServidorCentral:
         recursos_no_disponibles = {}
         alerta_generada = False
 
-        with self.lock_salones:
+        with self.lock:
             salones_disponibles = [s for s in self.salones if s not in self.salones_asignados]
             if len(salones_disponibles) >= num_salones:
                 salones_asignados = salones_disponibles[:num_salones]
@@ -73,29 +70,26 @@ class ServidorCentral:
                 alerta_generada = True
                 self.logger.warning(f"No hay suficientes salones disponibles. Faltan: {recursos_no_disponibles['salones']}")
 
-        with self.lock_laboratorios:
             labs_disponibles = [l for l in self.laboratorios if l not in self.laboratorios_asignados]
             if len(labs_disponibles) >= num_laboratorios:
                 laboratorios_asignados = labs_disponibles[:num_laboratorios]
                 self.laboratorios_asignados.extend(laboratorios_asignados)
             else:
                 faltan_labs = num_laboratorios - len(labs_disponibles)
-                with self.lock_aulas_moviles:
-                    am_disponibles = [am for am in self.aulas_moviles if am not in self.aulas_moviles_asignados]
-                    if len(am_disponibles) >= faltan_labs:
-                        aulas_moviles_asignadas = am_disponibles[:faltan_labs]
-                        self.aulas_moviles_asignados.extend(aulas_moviles_asignadas)
-                        laboratorios_asignados = labs_disponibles
-                        self.laboratorios_asignados.extend(labs_disponibles)
-                        recursos_no_disponibles['laboratorios_convertidos'] = faltan_labs
-                    else:
-                        recursos_no_disponibles['laboratorios'] = faltan_labs
-                        laboratorios_asignados = labs_disponibles
-                        self.laboratorios_asignados.extend(labs_disponibles)
-                        alerta_generada = True
+                am_disponibles = [am for am in self.aulas_moviles if am not in self.aulas_moviles_asignados]
+                if len(am_disponibles) >= faltan_labs:
+                    aulas_moviles_asignadas = am_disponibles[:faltan_labs]
+                    self.aulas_moviles_asignados.extend(aulas_moviles_asignadas)
+                    laboratorios_asignados = labs_disponibles
+                    self.laboratorios_asignados.extend(labs_disponibles)
+                    recursos_no_disponibles['laboratorios_convertidos'] = faltan_labs
+                else:
+                    recursos_no_disponibles['laboratorios'] = faltan_labs
+                    laboratorios_asignados = labs_disponibles
+                    self.laboratorios_asignados.extend(labs_disponibles)
+                    alerta_generada = True
                 self.logger.warning(f"No hay suficientes laboratorios disponibles. Faltan: {faltan_labs}")
 
-        with self.lock_aulas_moviles:
             am_disponibles = [am for am in self.aulas_moviles if am not in self.aulas_moviles_asignados]
             am_directas = num_aulas_moviles - len(aulas_moviles_asignadas)
             if am_directas > 0:
@@ -107,7 +101,7 @@ class ServidorCentral:
                     aulas_moviles_asignadas.extend(am_disponibles)
                     self.aulas_moviles_asignados.extend(am_disponibles)
                     alerta_generada = True
-                    self.logger.warning(f"No hay suficientes aulas móviles disponibles. Faltan: {recursos_no_disponibles['aulas_moviles']}")
+                self.logger.warning(f"No hay suficientes aulas móviles disponibles. Faltan: {recursos_no_disponibles['aulas_moviles']}")
 
         if alerta_generada:
             alerta = {
@@ -125,7 +119,7 @@ class ServidorCentral:
                     'aulas_moviles': len(aulas_moviles_asignadas)
                 }
             }
-            with threading.Lock():
+            with self.lock:
                 self.solicitudes_no_atendidas[id_solicitud] = alerta
                 self._guardar_datos()
             self.logger.warning(f"ALERTA: No se pudieron asignar todos los recursos solicitados: {alerta}")
@@ -137,7 +131,7 @@ class ServidorCentral:
             'no_asignados': recursos_no_disponibles if recursos_no_disponibles else None
         }
 
-        with threading.Lock():
+        with self.lock:
             self.solicitudes[id_solicitud] = {
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'solicitud': {
@@ -153,16 +147,20 @@ class ServidorCentral:
         return resultado
 
     def procesar_solicitud(self, mensaje):
+        self.logger.info(f"Procesando solicitud: {mensaje}")
         if mensaje.get("comando") == "ping":
             return {"estado": "activo"}
+        
         facultad = mensaje.get('facultad', 'Desconocida')
         programa = mensaje.get('programa', 'Desconocido')
         num_salones = mensaje.get('num_salones', 0)
         num_laboratorios = mensaje.get('num_laboratorios', 0)
         num_aulas_moviles = mensaje.get('num_aulas_moviles', 0)
         id_solicitud = f"{facultad}-{programa}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        self.solicitudes[id_solicitud] = mensaje
+        with self.lock:
+            self.solicitudes[id_solicitud] = mensaje
         resultado = self.asignar_recursos(num_salones, num_laboratorios, num_aulas_moviles)
+        
         respuesta = {
             'id_solicitud': id_solicitud,
             'facultad': facultad,
@@ -172,24 +170,37 @@ class ServidorCentral:
         }
         return respuesta
 
-    def procesar_solicitud_hilo(self, mensaje):
-        respuesta = self.procesar_solicitud(mensaje)
-        self.socket.send_json(respuesta)
-
-    def iniciar(self):
-        self.socket.bind(f"tcp://*:{self.puerto_escucha}")
-        self.logger.info(f"Servidor iniciado en puerto {self.puerto_escucha}")
-        self.socket.setsockopt(zmq.RCVTIMEO, 1000)
+    def trabajador(self, worker_url):
+        """Función que ejecuta cada trabajador"""
+        socket = self.context.socket(zmq.REP)
+        socket.connect(worker_url)
+        self.logger.info(f"Trabajador conectado a {worker_url}")
         while True:
             try:
-                mensaje = self.socket.recv_json()
-                self.logger.info(f"Solicitud recibida: {mensaje}")
-                threading.Thread(target=self.procesar_solicitud_hilo, args=(mensaje,), daemon=True).start()
-            except zmq.error.Again:
-                continue
+                mensaje = socket.recv_json()
+                respuesta = self.procesar_solicitud(mensaje)
+                socket.send_json(respuesta)
             except Exception as e:
-                self.logger.error(f"Error procesando solicitud: {e}")
-        
+                self.logger.error(f"Error en trabajador: {e}")
+
+    def iniciar(self):
+        # Configurar el frontend (ROUTER)
+        frontend = self.context.socket(zmq.ROUTER)
+        frontend.bind(f"tcp://*:{self.puerto_escucha}")
+        self.logger.info(f"Servidor frontend iniciado en puerto {self.puerto_escucha}")
+
+        # Configurar el backend (DEALER)
+        backend = self.context.socket(zmq.DEALER)
+        backend.bind("inproc://workers")
+
+        # Iniciar trabajadores
+        for i in range(self.num_trabajadores):
+            threading.Thread(target=self.trabajador, args=("inproc://workers",), daemon=True).start()
+
+        # Conectar frontend y backend con un proxy
+        self.logger.info("Iniciando proxy ROUTER-DEALER")
+        zmq.proxy(frontend, backend)
+
 if __name__ == "__main__":
     servidor = ServidorCentral()
     servidor.iniciar()

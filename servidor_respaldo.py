@@ -28,8 +28,6 @@ class RespaldoHealthChecker:
         self.context = zmq.Context()
         self.socket_principal = self.context.socket(zmq.REQ)
         self.socket_principal.connect(f"tcp://{self.ip_principal}:{self.puerto_principal}")
-        self.socket_respaldo = self.context.socket(zmq.REP)
-        self.socket_control = self.context.socket(zmq.REP)
         self.salones = [f"S{i}" for i in range(1, 381)]
         self.laboratorios = [f"L{i}" for i in range(1, 61)]
         self.aulas_moviles = [f"AM{i}" for i in range(1, 6)]
@@ -38,9 +36,7 @@ class RespaldoHealthChecker:
         self.aulas_moviles_asignados = []
         self.solicitudes = {}
         self.solicitudes_no_atendidas = {}
-        self.lock_salones = threading.Lock()
-        self.lock_laboratorios = threading.Lock()
-        self.lock_aulas_moviles = threading.Lock()
+        self.lock = threading.Lock()  # Para sincronizar acceso a recursos compartidos
         self.archivo_solicitudes = "solicitudes.json"
         self.archivo_no_atendidas = "solicitudes_no_atendidas.json"
         self._cargar_datos()
@@ -66,7 +62,6 @@ class RespaldoHealthChecker:
             self.logger.error(f"Error guardando datos: {e}")
 
     def asignar_recursos(self, num_salones, num_laboratorios, num_aulas_moviles):
-        # Código sin cambios (igual al original)...
         id_solicitud = f"{datetime.now().strftime('%Y%m%d%H%M%S')}-{threading.get_ident()}"
         salones_asignados = []
         laboratorios_asignados = []
@@ -74,7 +69,7 @@ class RespaldoHealthChecker:
         recursos_no_disponibles = {}
         alerta_generada = False
 
-        with self.lock_salones:
+        with self.lock:
             salones_disponibles = [s for s in self.salones if s not in self.salones_asignados]
             if len(salones_disponibles) >= num_salones:
                 salones_asignados = salones_disponibles[:num_salones]
@@ -86,29 +81,26 @@ class RespaldoHealthChecker:
                 alerta_generada = True
                 self.logger.warning(f"No hay suficientes salones disponibles. Faltan: {recursos_no_disponibles['salones']}")
 
-        with self.lock_laboratorios:
             labs_disponibles = [l for l in self.laboratorios if l not in self.laboratorios_asignados]
             if len(labs_disponibles) >= num_laboratorios:
                 laboratorios_asignados = labs_disponibles[:num_laboratorios]
                 self.laboratorios_asignados.extend(laboratorios_asignados)
             else:
                 faltan_labs = num_laboratorios - len(labs_disponibles)
-                with self.lock_aulas_moviles:
-                    am_disponibles = [am for am in self.aulas_moviles if am not in self.aulas_moviles_asignados]
-                    if len(am_disponibles) >= faltan_labs:
-                        aulas_moviles_asignadas = am_disponibles[:faltan_labs]
-                        self.aulas_moviles_asignados.extend(aulas_moviles_asignadas)
-                        laboratorios_asignados = labs_disponibles
-                        self.laboratorios_asignados.extend(labs_disponibles)
-                        recursos_no_disponibles['laboratorios_convertidos'] = faltan_labs
-                    else:
-                        recursos_no_disponibles['laboratorios'] = faltan_labs
-                        laboratorios_asignados = labs_disponibles
-                        self.laboratorios_asignados.extend(labs_disponibles)
-                        alerta_generada = True
+                am_disponibles = [am for am in self.aulas_moviles if am not in self.aulas_moviles_asignados]
+                if len(am_disponibles) >= faltan_labs:
+                    aulas_moviles_asignadas = am_disponibles[:faltan_labs]
+                    self.aulas_moviles_asignados.extend(aulas_moviles_asignadas)
+                    laboratorios_asignados = labs_disponibles
+                    self.laboratorios_asignados.extend(labs_disponibles)
+                    recursos_no_disponibles['laboratorios_convertidos'] = faltan_labs
+                else:
+                    recursos_no_disponibles['laboratorios'] = faltan_labs
+                    laboratorios_asignados = labs_disponibles
+                    self.laboratorios_asignados.extend(labs_disponibles)
+                    alerta_generada = True
                 self.logger.warning(f"No hay suficientes laboratorios disponibles. Faltan: {faltan_labs}")
 
-        with self.lock_aulas_moviles:
             am_disponibles = [am for am in self.aulas_moviles if am not in self.aulas_moviles_asignados]
             am_directas = num_aulas_moviles - len(aulas_moviles_asignadas)
             if am_directas > 0:
@@ -120,7 +112,7 @@ class RespaldoHealthChecker:
                     aulas_moviles_asignadas.extend(am_disponibles)
                     self.aulas_moviles_asignados.extend(am_disponibles)
                     alerta_generada = True
-                    self.logger.warning(f"No hay suficientes aulas móviles disponibles. Faltan: {recursos_no_disponibles['aulas_moviles']}")
+                self.logger.warning(f"No hay suficientes aulas móviles disponibles. Faltan: {recursos_no_disponibles['aulas_moviles']}")
 
         if alerta_generada:
             alerta = {
@@ -138,7 +130,7 @@ class RespaldoHealthChecker:
                     'aulas_moviles': len(aulas_moviles_asignadas)
                 }
             }
-            with threading.Lock():
+            with self.lock:
                 self.solicitudes_no_atendidas[id_solicitud] = alerta
                 self._guardar_datos()
             self.logger.warning(f"ALERTA: No se pudieron asignar todos los recursos solicitados: {alerta}")
@@ -150,7 +142,7 @@ class RespaldoHealthChecker:
             'no_asignados': recursos_no_disponibles if recursos_no_disponibles else None
         }
 
-        with threading.Lock():
+        with self.lock:
             self.solicitudes[id_solicitud] = {
                 'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 'solicitud': {
@@ -166,16 +158,20 @@ class RespaldoHealthChecker:
         return resultado
 
     def procesar_solicitud(self, mensaje):
+        self.logger.info(f"Procesando solicitud: {mensaje}")
         if mensaje.get("comando") == "ping":
             return {"estado": "activo"}
+        
         facultad = mensaje.get('facultad', 'Desconocida')
         programa = mensaje.get('programa', 'Desconocido')
         num_salones = mensaje.get('num_salones', 0)
         num_laboratorios = mensaje.get('num_laboratorios', 0)
         num_aulas_moviles = mensaje.get('num_aulas_moviles', 0)
         id_solicitud = f"{facultad}-{programa}-{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        self.solicitudes[id_solicitud] = mensaje
+        with self.lock:
+            self.solicitudes[id_solicitud] = mensaje
         resultado = self.asignar_recursos(num_salones, num_laboratorios, num_aulas_moviles)
+        
         respuesta = {
             'id_solicitud': id_solicitud,
             'facultad': facultad,
@@ -198,12 +194,30 @@ class RespaldoHealthChecker:
             self.logger.warning(f"Fallo detectado en servidor principal ({self.fallos_consecutivos}/{self.max_fallos})")
             return False
 
+    def trabajador(self, worker_url):
+        """Función que ejecuta cada trabajador para el respaldo"""
+        socket = self.context.socket(zmq.REP)
+        socket.connect(worker_url)
+        self.logger.info(f"Trabajador de respaldo conectado a {worker_url}")
+        while True:
+            try:
+                mensaje = socket.recv_json()
+                respuesta = self.procesar_solicitud(mensaje)
+                socket.send_json(respuesta)
+            except Exception as e:
+                self.logger.error(f"Error en trabajador de respaldo: {e}")
+
     def proxy(self):
         frontend = self.context.socket(zmq.ROUTER)
         backend = self.context.socket(zmq.DEALER)
         frontend.bind(f"tcp://*:{self.puerto_proxy}")
-        backend.connect(self.servidor_activo)
-        self.logger.info(f"Proxy iniciado en puerto {self.puerto_proxy}, redirigiendo a {self.servidor_activo}")
+        backend.bind("inproc://respaldo_workers")
+        self.logger.info(f"Proxy de respaldo iniciado en puerto {self.puerto_proxy}, redirigiendo a trabajadores")
+
+        # Iniciar trabajadores para el respaldo
+        for i in range(3):  # Menor número de trabajadores para respaldo
+            threading.Thread(target=self.trabajador, args=("inproc://respaldo_workers",), daemon=True).start()
+
         zmq.proxy(frontend, backend)
 
     def procesar_solicitud_hilo(self, mensaje):
@@ -217,12 +231,12 @@ class RespaldoHealthChecker:
         while self.estado == "activo":
             try:
                 mensaje = self.socket_respaldo.recv_json()
-                self.logger.info(f"Solicitud recibida: {mensaje}")
+                self.logger.info(f"Solicitud recibida en respaldo: {mensaje}")
                 threading.Thread(target=self.procesar_solicitud_hilo, args=(mensaje,), daemon=True).start()
             except zmq.error.Again:
                 continue
             except Exception as e:
-                self.logger.error(f"Error procesando solicitud: {e}")
+                self.logger.error(f"Error procesando solicitud en respaldo: {e}")
 
     def iniciar_control(self):
         self.socket_control.bind(f"tcp://*:{self.puerto_control}")
