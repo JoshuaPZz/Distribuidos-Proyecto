@@ -158,7 +158,7 @@ if __name__ == "__main__":
     
     nombre_facultad = sys.argv[1]
     servidor_ip = sys.argv[2] if len(sys.argv) > 2 else "localhost"
-    servidor_puerto = int(sys.argv[3]) if len(sys.argv) > 3 else 5555
+    servidor_puerto = (sys.argv[3]) if len(sys.argv) > 3 else 5555
     
     facultad = Facultad(nombre_facultad, servidor_ip, servidor_puerto)
     facultad.iniciar()
