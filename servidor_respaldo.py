@@ -33,6 +33,11 @@ class RespaldoHealthChecker:
         self.socket_respaldo = self.context.socket(zmq.REP)
         self.socket_control = self.context.socket(zmq.REP)
         
+        # Referencias a los sockets del proxy para cerrarlos más tarde
+        self.proxy_frontend = None
+        self.proxy_backend = None
+        self.proxy_thread = None
+        
         self.salones = [f"S{i}" for i in range(1, 381)]
         self.laboratorios = [f"L{i}" for i in range(1, 61)]
         self.aulas_moviles = [f"AM{i}" for i in range(1, 6)]
@@ -222,28 +227,49 @@ class RespaldoHealthChecker:
             except Exception as e:
                 self.logger.error(f"Error en trabajador de respaldo: {e}")
 
+    def cerrar_proxy(self):
+        """Cierra los sockets del proxy si están activos."""
+        if self.proxy_frontend:
+            self.proxy_frontend.close()
+            self.proxy_frontend = None
+        if self.proxy_backend:
+            self.proxy_backend.close()
+            self.proxy_backend = None
+        self.proxy_activo = False
+        self.logger.info("Proxy cerrado correctamente")
+
     def proxy(self):
         if self.proxy_activo:
-            self.logger.warning("Proxy ya está activo, no se iniciará de nuevo")
-            return
+            self.logger.warning("Proxy ya está activo, cerrando el anterior antes de iniciar uno nuevo")
+            self.cerrar_proxy()
+        
+        self.proxy_frontend = None
+        self.proxy_backend = None
         try:
-            frontend = self.context.socket(zmq.ROUTER)
-            frontend.bind(f"tcp://*:{self.puerto_proxy}")
-            backend = self.context.socket(zmq.DEALER)
-            backend.bind("inproc://respaldo_workers")
+            self.proxy_frontend = self.context.socket(zmq.ROUTER)
+            self.proxy_frontend.bind(f"tcp://*:{self.puerto_proxy}")
+            self.proxy_backend = self.context.socket(zmq.DEALER)
+            self.proxy_backend.bind("inproc://respaldo_workers")
             self.logger.info(f"Proxy de respaldo iniciado en puerto {self.puerto_proxy}, redirigiendo a trabajadores")
             self.proxy_activo = True
             for i in range(3):
                 threading.Thread(target=self.trabajador, args=("inproc://respaldo_workers",), daemon=True).start()
-            zmq.proxy(frontend, backend)
+            zmq.proxy(self.proxy_frontend, self.proxy_backend)
         except zmq.ZMQError as e:
             if e.errno == zmq.EADDRINUSE:
                 self.logger.error(f"El puerto {self.puerto_proxy} ya está en uso. Cambia el puerto o libera el actual.")
             else:
                 self.logger.error(f"Error al iniciar proxy: {e}")
+        except Exception as e:
+            self.logger.error(f"Error inesperado en proxy: {e}")
         finally:
-            frontend.close()
-            backend.close()
+            if self.proxy_frontend:
+                self.proxy_frontend.close()
+                self.proxy_frontend = None
+            if self.proxy_backend:
+                self.proxy_backend.close()
+                self.proxy_backend = None
+            self.proxy_activo = False
 
     def procesar_solicitud_hilo(self, mensaje):
         respuesta = self.procesar_solicitud(mensaje)
@@ -294,12 +320,12 @@ class RespaldoHealthChecker:
                     self.logger.warning("Servidor principal no responde, activando modo respaldo")
                     self.estado = "activo"
                     self.servidor_activo = f"tcp://localhost:{self.puerto_respaldo}"
-                    self.proxy_activo = False
+                    self.cerrar_proxy()  # Cierra el proxy existente antes de iniciar uno nuevo
                     time.sleep(1)
                     proxy_thread = threading.Thread(target=self.proxy)
                     proxy_thread.daemon = True
                     proxy_thread.start()
-                    self.proxy_activo = True
+                    self.proxy_thread = proxy_thread
                     self.iniciar_respaldo()
                     break
             time.sleep(2)  # Retraso entre verificaciones
@@ -310,9 +336,18 @@ class RespaldoHealthChecker:
         proxy_thread = threading.Thread(target=self.proxy)
         proxy_thread.daemon = True
         proxy_thread.start()
+        self.proxy_thread = proxy_thread
         self.proxy_activo = True
-        while True:
-            time.sleep(1)
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            self.logger.info("Deteniendo servidor de respaldo...")
+            self.cerrar_proxy()
+            self.socket_principal.close()
+            self.socket_respaldo.close()
+            self.socket_control.close()
+            self.context.term()
 
     def reiniciar_socket(self):
         """Reinicia el socket REQ para el servidor principal."""
@@ -333,4 +368,4 @@ if __name__ == "__main__":
         puerto_control=int(sys.argv[4]),
         puerto_proxy=int(sys.argv[5])
     )
-    checker.iniciar()
+    checker.iniciar() 
