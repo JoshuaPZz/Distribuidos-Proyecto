@@ -323,8 +323,8 @@ if __name__ == "__main__":
     
     nombre_facultad = sys.argv[1]
     servidor_ip = sys.argv[2] if len(sys.argv) > 2 else "localhost"
-    servidor_puerto = int(sys.argv[3]) if len(sys.argv) > 3 else 5555  # CORREGIDO: Conversión a int
-    respaldo_ip = sys.argv[4] if len(sys.argv) > 4 else "localhost"
+    servidor_puerto = int(sys.argv[4]) if len(sys.argv) > 3 else 5555  # CORREGIDO: Conversión a int
+    respaldo_ip = sys.argv[3] if len(sys.argv) > 4 else "localhost"
     puerto_respaldo = int(sys.argv[5]) if len(sys.argv) > 5 else 5558  # AGREGADO: Puerto respaldo
     
     facultad = Facultad(nombre_facultad, servidor_ip, servidor_puerto, respaldo_ip, puerto_respaldo)
