@@ -182,16 +182,26 @@ class RespaldoHealthChecker:
         return respuesta
 
     def verificar_servidor(self):
-        self.socket_principal.setsockopt(zmq.RCVTIMEO, 1000)
+        self.socket_principal.setsockopt(zmq.RCVTIMEO, 1000)  # Timeout de 1 segundo para recibir
         try:
+            self.logger.info("Enviando ping al servidor principal")
             self.socket_principal.send_json({"comando": "ping"})
             respuesta = self.socket_principal.recv_json()
             self.logger.info("Servidor principal activo")
             self.fallos_consecutivos = 0
             return True
         except zmq.error.Again:
+            self.logger.warning("Timeout: No se recibió respuesta del servidor principal")
             self.fallos_consecutivos += 1
-            self.logger.warning(f"Fallo detectado en servidor principal ({self.fallos_consecutivos}/{self.max_fallos})")
+            self.reiniciar_socket()  # Reinicia el socket para el próximo intento
+            return False
+        except zmq.ZMQError as e:
+            if e.errno == zmq.EFSM:
+                self.logger.error("Error de estado en el socket: reiniciando socket")
+                self.reiniciar_socket()
+            else:
+                self.logger.error(f"Error en verificar_servidor: {e}")
+            self.fallos_consecutivos += 1
             return False
 
     def trabajador(self, worker_url):
@@ -270,7 +280,7 @@ class RespaldoHealthChecker:
                     self.proxy_activo = True
                     self.iniciar_respaldo()
                     break
-            time.sleep(2)
+            time.sleep(2)  # Retraso entre verificaciones
 
     def iniciar(self):
         threading.Thread(target=self.iniciar_control, daemon=True).start()
@@ -281,6 +291,13 @@ class RespaldoHealthChecker:
         self.proxy_activo = True
         while True:
             time.sleep(1)
+
+    def reiniciar_socket(self):
+        """Reinicia el socket REQ para el servidor principal."""
+        self.socket_principal.close()
+        self.socket_principal = self.context.socket(zmq.REQ)
+        self.socket_principal.connect(f"tcp://{self.ip_principal}:{self.puerto_principal}")
+        self.logger.info("Socket REQ reiniciado para el servidor principal")
 
 if __name__ == "__main__":
     import sys
