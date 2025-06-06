@@ -52,6 +52,7 @@ class Facultad:
         try:
             if self.socket_servidor:
                 self.socket_servidor.close()
+                self.logger.debug("Socket anterior cerrado")
             
             self.socket_servidor = self.context_servidor.socket(zmq.REQ)
             self.socket_servidor.setsockopt(zmq.RCVTIMEO, TIMEOUTS['confirmacion'])
@@ -77,28 +78,50 @@ class Facultad:
             respuesta = test_socket.recv_json()
             test_socket.close()
             
-            return respuesta.get("estado") == "activo"
+            if respuesta.get("estado") == "activo":
+                self.logger.debug(f"Ping exitoso al servidor {self.servidor_activo}")
+                return True
+            else:
+                self.logger.warning(f"Respuesta inesperada del servidor {self.servidor_activo}: {respuesta}")
+                return False
         except Exception as e:
-            self.logger.warning(f"Prueba de conexión falló: {e}")
+            self.logger.warning(f"Prueba de conexión falló en {self.servidor_activo}: {e}")
+            return False
+        finally:
             if 'test_socket' in locals():
                 test_socket.close()
-            return False
 
     def cambiar_a_respaldo(self):
         """Cambia la conexión al servidor de respaldo."""
         with self.lock:
             if not self.usando_respaldo:
-                self.logger.warning("Servidor principal no disponible, cambiando a respaldo...")
+                self.logger.warning("Servidor principal no disponible, intentando conectar al respaldo...")
                 self.servidor_activo = f"tcp://{self.respaldo_ip}:{self.puerto_respaldo}"
-                self.usando_respaldo = True
-                self.fallos_consecutivos = 0
                 
-                if self.conectar_servidor():
-                    self.logger.info("Conectado exitosamente al servidor de respaldo")
-                    return True
-                else:
-                    self.logger.error("Error conectando al servidor de respaldo")
+                # Probar conexión al respaldo antes de cambiar
+                test_socket = self.context_servidor.socket(zmq.REQ)
+                test_socket.setsockopt(zmq.RCVTIMEO, 2000)
+                test_socket.setsockopt(zmq.SNDTIMEO, 2000)
+                test_socket.setsockopt(zmq.LINGER, 0)
+                test_socket.connect(self.servidor_activo)
+                
+                try:
+                    test_socket.send_json({"comando": "ping"})
+                    respuesta = test_socket.recv_json()
+                    if respuesta.get("estado") == "activo":
+                        self.usando_respaldo = True
+                        self.fallos_consecutivos = 0
+                        self.conectar_servidor()
+                        self.logger.info(f"Conectado exitosamente al servidor de respaldo {self.servidor_activo}")
+                        return True
+                    else:
+                        self.logger.warning(f"Servidor de respaldo respondió pero no está activo: {respuesta}")
+                        return False
+                except Exception as e:
+                    self.logger.error(f"Error conectando al servidor de respaldo {self.servidor_activo}: {e}")
                     return False
+                finally:
+                    test_socket.close()
             return True
 
     def volver_a_principal(self):
@@ -107,38 +130,25 @@ class Facultad:
             if self.usando_respaldo:
                 servidor_temp = f"tcp://{self.servidor_ip}:{self.servidor_puerto}"
                 
-                # Probar conexión al servidor principal
-                try:
-                    test_socket = self.context_servidor.socket(zmq.REQ)
-                    test_socket.setsockopt(zmq.RCVTIMEO, 2000)
-                    test_socket.setsockopt(zmq.SNDTIMEO, 2000)
-                    test_socket.setsockopt(zmq.LINGER, 0)
-                    test_socket.connect(servidor_temp)
-                    
-                    test_socket.send_json({"comando": "ping"})
-                    respuesta = test_socket.recv_json()
-                    test_socket.close()
-                    
-                    if respuesta.get("estado") == "activo":
-                        self.logger.info("Servidor principal disponible, volviendo...")
-                        self.servidor_activo = servidor_temp
-                        self.usando_respaldo = False
-                        self.fallos_consecutivos = 0
-                        self.conectar_servidor()
-                        return True
-                        
-                except Exception as e:
-                    self.logger.debug(f"Servidor principal aún no disponible: {e}")
-                    if 'test_socket' in locals():
-                        test_socket.close()
-            
+                if self.probar_conexion_servidor():
+                    self.logger.info("Servidor principal disponible, volviendo...")
+                    self.servidor_activo = servidor_temp
+                    self.usando_respaldo = False
+                    self.fallos_consecutivos = 0
+                    self.conectar_servidor()
+                    return True
+                else:
+                    self.logger.debug(f"Servidor principal {servidor_temp} aún no disponible")
+                    return False
             return False
 
     def iniciar(self):
         """Inicia la facultad y se conecta con el servidor"""
         if not self.conectar_servidor():
-            self.logger.error("No se pudo conectar al servidor inicial")
-            return
+            self.logger.warning("No se pudo conectar al servidor principal, intentando respaldo...")
+            if not self.cambiar_a_respaldo():
+                self.logger.error("No se pudo conectar al servidor de respaldo. Deteniendo facultad.")
+                return
             
         self.logger.info(f"Facultad {self.nombre} iniciada. Puerto de escucha: {self.puerto_escucha}")
         
@@ -216,7 +226,7 @@ class Facultad:
             intento += 1
             
             try:
-                self.logger.info(f"Enviando solicitud (intento {intento}): {solicitud['programa']}")
+                self.logger.info(f"Enviando solicitud (intento {intento}): {solicitud['programa']} a {self.servidor_activo}")
                 self.socket_servidor.send_json(solicitud)
                 respuesta = self.socket_servidor.recv_json()
                 
@@ -242,7 +252,7 @@ class Facultad:
                 return respuesta
                 
             except zmq.Again:
-                self.logger.warning(f"Timeout en intento {intento} - servidor no responde")
+                self.logger.warning(f"Timeout en intento {intento} - servidor {self.servidor_activo} no responde")
                 self.manejar_error_conexion()
                 
             except zmq.ZMQError as e:
@@ -255,7 +265,7 @@ class Facultad:
             
             # Esperar antes del siguiente intento
             if intento < max_intentos:
-                time.sleep(1)
+                time.sleep(TIMEOUTS['reintento'] / 1000)  # Convertir ms a segundos
         
         self.logger.error(f"No se pudo procesar la solicitud después de {max_intentos} intentos")
         return None
@@ -263,12 +273,17 @@ class Facultad:
     def manejar_error_conexion(self):
         """Maneja errores de conexión y realiza failover si es necesario."""
         self.fallos_consecutivos += 1
+        self.logger.debug(f"Fallos consecutivos: {self.fallos_consecutivos}")
         
         # Intentar reconectar al servidor actual
         if not self.conectar_servidor():
-            # Si falla la reconexión y no estamos usando respaldo, cambiar
+            self.logger.warning(f"No se pudo reconectar al servidor {self.servidor_activo}")
+            # Si falla la reconexión y no estamos usando respaldo, intentar cambiar
             if not self.usando_respaldo and self.fallos_consecutivos >= self.max_fallos:
-                self.cambiar_a_respaldo()
+                if self.cambiar_a_respaldo():
+                    self.logger.info("Cambio a servidor de respaldo exitoso")
+                else:
+                    self.logger.error("No se pudo conectar al servidor de respaldo")
             elif self.usando_respaldo:
                 # Si ya estamos en respaldo y sigue fallando, intentar reconectar
                 self.logger.warning("Servidor de respaldo también presenta problemas")
@@ -318,14 +333,14 @@ class Facultad:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print("Uso: python facultad.py <nombre_facultad> [servidor_ip] [servidor_puerto] [respaldo_ip] [puerto_respaldo]")
+        print("Uso: python facultad.py <nombre_facultad> [servidor_ip] [respaldo_ip] [servidor_puerto] [puerto_respaldo]")
         sys.exit(1)
     
     nombre_facultad = sys.argv[1]
     servidor_ip = sys.argv[2] if len(sys.argv) > 2 else "localhost"
-    servidor_puerto = int(sys.argv[4]) if len(sys.argv) > 3 else 5555  # CORREGIDO: Conversión a int
-    respaldo_ip = sys.argv[3] if len(sys.argv) > 4 else "localhost"
-    puerto_respaldo = int(sys.argv[5]) if len(sys.argv) > 5 else 5558  # AGREGADO: Puerto respaldo
+    respaldo_ip = sys.argv[3] if len(sys.argv) > 3 else "localhost"
+    servidor_puerto = int(sys.argv[4]) if len(sys.argv) > 4 else 5555
+    puerto_respaldo = int(sys.argv[5]) if len(sys.argv) > 5 else 5558
     
     facultad = Facultad(nombre_facultad, servidor_ip, servidor_puerto, respaldo_ip, puerto_respaldo)
     facultad.iniciar()
