@@ -13,12 +13,12 @@ logging.basicConfig(
 )
 
 class RespaldoHealthChecker:
-    def __init__(self, ip_principal="", puerto_principal=5555, 
-                 puerto_respaldo=5556, puerto_proxy=5558):
+    def __init__(self, ip_principal="", puerto_principal=5555, puerto_respaldo=5556, puerto_control=5557, puerto_proxy=5558):
         self.logger = logging.getLogger('RespaldoHealthChecker')
         self.ip_principal = ip_principal
         self.puerto_principal = puerto_principal
         self.puerto_respaldo = puerto_respaldo
+        self.puerto_control = puerto_control
         self.puerto_proxy = puerto_proxy
         self.estado = "pasivo"  # "pasivo" o "activo"
         self.fallos_consecutivos = 0
@@ -41,7 +41,25 @@ class RespaldoHealthChecker:
         self.lock_aulas_moviles = threading.Lock()
         self.archivo_solicitudes = "solicitudes.json"
         self.archivo_no_atendidas = "solicitudes_no_atendidas.json"
+        self.socket_control = self.context.socket(zmq.REP)
         self._cargar_datos()
+    
+    def iniciar_control(self):
+        self.socket_control.bind(f"tcp://*:{self.puerto_control}")
+        self.logger.info(f"Control de respaldo iniciado en puerto {self.puerto_control}")
+        while self.estado == "pasivo":
+            try:
+                mensaje = self.socket_control.recv_json()
+                if mensaje.get("comando") == "activar":
+                    self.estado = "activo"
+                    self.socket_control.send_json({"estado": "activado"})
+                    self.iniciar_respaldo()
+                    break
+            except zmq.error.Again:
+                continue
+            except Exception as e:
+                self.logger.error(f"Error en puerto de control: {e}")
+        self.socket_control.close()
 
     def _cargar_datos(self):
         try:
@@ -206,28 +224,26 @@ class RespaldoHealthChecker:
         self.logger.info(f"Proxy iniciado en puerto {self.puerto_proxy}, redirigiendo a {self.servidor_activo}")
         zmq.proxy(frontend, backend)
 
+    def procesar_solicitud_hilo(self, mensaje):
+        respuesta = self.procesar_solicitud(mensaje)
+        self.socket_respaldo.send_json(respuesta)
+
     def iniciar_respaldo(self):
         self.socket_respaldo.bind(f"tcp://*:{self.puerto_respaldo}")
         self.logger.info(f"Servidor de respaldo iniciado en puerto {self.puerto_respaldo}")
         self.socket_respaldo.setsockopt(zmq.RCVTIMEO, 1000)
-        try:
-            while self.estado == "activo":
-                try:
-                    mensaje = self.socket_respaldo.recv_json()
-                    self.logger.info(f"Solicitud recibida: {mensaje}")
-                    respuesta = self.procesar_solicitud(mensaje)
-                    self.socket_respaldo.send_json(respuesta)
-                except zmq.error.Again:
-                    continue
-                except Exception as e:
-                    self.logger.error(f"Error procesando solicitud: {e}")
-        except KeyboardInterrupt:
-            self.logger.info("Servidor de respaldo detenido")
-        finally:
-            self._guardar_datos()
-            self.socket_respaldo.close()
+        while self.estado == "activo":
+            try:
+                mensaje = self.socket_respaldo.recv_json()
+                self.logger.info(f"Solicitud recibida: {mensaje}")
+                threading.Thread(target=self.procesar_solicitud_hilo, args=(mensaje,), daemon=True).start()
+            except zmq.error.Again:
+                continue
+            except Exception as e:
+                self.logger.error(f"Error procesando solicitud: {e}")
 
     def iniciar(self):
+        threading.Thread(target=self.iniciar_control, daemon=True).start()
         # Iniciar proxy en un hilo separado
         proxy_thread = threading.Thread(target=self.proxy)
         proxy_thread.daemon = True

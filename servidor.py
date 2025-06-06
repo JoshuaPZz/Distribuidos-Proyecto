@@ -172,28 +172,24 @@ class ServidorCentral:
         }
         return respuesta
 
+    def procesar_solicitud_hilo(self, mensaje):
+        respuesta = self.procesar_solicitud(mensaje)
+        self.socket.send_json(respuesta)
+
     def iniciar(self):
         self.socket.bind(f"tcp://*:{self.puerto_escucha}")
         self.logger.info(f"Servidor iniciado en puerto {self.puerto_escucha}")
         self.socket.setsockopt(zmq.RCVTIMEO, 1000)
-        try:
-            while True:
-                try:
-                    mensaje = self.socket.recv_json()
-                    self.logger.info(f"Solicitud recibida: {mensaje}")
-                    respuesta = self.procesar_solicitud(mensaje)
-                    self.socket.send_json(respuesta)
-                except zmq.error.Again:
-                    continue
-                except Exception as e:
-                    self.logger.error(f"Error procesando solicitud: {e}")
-        except KeyboardInterrupt:
-            self.logger.info("Servidor detenido")
-        finally:
-            self._guardar_datos()
-            self.socket.close()
-            self.context.term()
-
+        while True:
+            try:
+                mensaje = self.socket.recv_json()
+                self.logger.info(f"Solicitud recibida: {mensaje}")
+                threading.Thread(target=self.procesar_solicitud_hilo, args=(mensaje,), daemon=True).start()
+            except zmq.error.Again:
+                continue
+            except Exception as e:
+                self.logger.error(f"Error procesando solicitud: {e}")
+        
 if __name__ == "__main__":
     servidor = ServidorCentral()
     servidor.iniciar()

@@ -57,85 +57,73 @@ class Facultad:
             self.context_servidor.term()
     
     def simular_solicitudes(self):
-        """Simula solicitudes de programas académicos"""
         programas = [
-            "Ingeniería de Sistemas",
-            "Ingeniería Civil",
-            "Medicina",
-            "Derecho",
-            "Biología"
+            "Ingeniería de Sistemas", "Ingeniería Civil", "Medicina", "Derecho", "Biología"
         ]
-        
         while self.ejecutando:
-            # Esperar un tiempo aleatorio antes de enviar solicitud
             time.sleep(random.uniform(3, 10))
-            
-            # Seleccionar un programa aleatoriamente
             programa = random.choice(programas)
-            
-            # Generar solicitud aleatoria
-            # Modificar en el método simular_solicitudes:
+            num_salones = random.randint(3, 8)
+            num_laboratorios = random.randint(2, 4)
+            while num_salones + num_laboratorios < 7 or num_salones + num_laboratorios > 10:
+                num_salones = random.randint(3, 8)
+                num_laboratorios = random.randint(2, 4)
             solicitud = {
                 'facultad': self.nombre,
                 'programa': programa,
-                'num_salones': random.randint(5, 8),  # Ajustar para que la suma esté entre 7 y 10
-                'num_laboratorios': random.randint(2, 4),
-                'num_aulas_moviles': 0  # Opcional, según necesidad
+                'num_salones': num_salones,
+                'num_laboratorios': num_laboratorios,
+                'num_aulas_moviles': 0
             }
-            
-            # Registrar solicitud
             self.programas_solicitudes[programa] = solicitud
-            
-            # Enviar solicitud al servidor
             self.enviar_solicitud_servidor(solicitud)
     
     def enviar_solicitud_servidor(self, solicitud):
-        """Envía una solicitud al servidor de forma asíncrona"""
-        self.logger.info(f"Enviando solicitud al servidor: {solicitud}")
-        
+        inicio = time.time()
         context = zmq.Context()
         socket = context.socket(zmq.REQ)
         socket.setsockopt(zmq.RCVTIMEO, TIMEOUTS['confirmacion'])
-        
+        socket.connect(f"tcp://{self.servidor_ip}:{self.servidor_puerto}")
+        socket.send_json(solicitud)
         try:
-            socket.connect(f"tcp://{self.servidor_ip}:{self.servidor_puerto}")
-            socket.send_json(solicitud)
-            
-            # Esperar respuesta
             respuesta = socket.recv_json()
+            fin = time.time()
+            tiempo_respuesta = fin - inicio
             self.confirmar_recepcion(respuesta)
-            
+            exito = respuesta.get('asignacion', {}).get('no_asignados') is None
+            with open("metricas_facultad.txt", "a") as f:
+                f.write(f"{solicitud['programa']},{tiempo_respuesta},{exito}\n")
         except zmq.Again:
             self.logger.warning("Timeout al esperar respuesta del servidor")
-            # Lógica de reintento podría ir aquí
-        except Exception as e:
-            self.logger.error(f"Error al comunicarse con el servidor: {e}")
         finally:
             socket.close()
             context.term()
     
+    def guardar_respuesta(self, respuesta, semestre="2025-10"):
+        archivo = f"respuestas_{self.nombre}_{semestre}.json"
+        try:
+            with open(archivo, 'a') as f:
+                json.dump(respuesta, f, indent=2)
+                f.write('\n')
+            self.logger.info(f"Respuesta guardada en {archivo}")
+        except Exception as e:
+            self.logger.error(f"Error al guardar respuesta: {e}")
+
     def confirmar_recepcion(self, respuesta):
-        """Procesa la respuesta recibida del servidor"""
         self.logger.info(f"Respuesta recibida del servidor: {respuesta}")
-        
-        # Guardar respuesta
         id_solicitud = respuesta.get('id_solicitud')
         if id_solicitud:
             self.respuestas_asignaciones[id_solicitud] = respuesta
-            
-            # Mostrar recursos asignados
+            self.guardar_respuesta(respuesta)
             asignacion = respuesta.get('asignacion', {})
             programa = respuesta.get('programa', 'Desconocido')
-            
             self.logger.info(f"Recursos asignados a {programa}:")
             self.logger.info(f"  - Salones: {len(asignacion.get('salones', []))} ({', '.join(asignacion.get('salones', []))})")
             self.logger.info(f"  - Laboratorios: {len(asignacion.get('laboratorios', []))} ({', '.join(asignacion.get('laboratorios', []))})")
-            self.logger.info(f"  - Aulas Móviles: {len(asignacion.get('aulas_moviles', []))} ({', '.join(asignacion.get('aulas_moviles', []))}")
-            
-            # Verificar recursos no asignados
+            self.logger.info(f"  - Aulas Móviles: {len(asignacion.get('aulas_moviles', []))} ({', '.join(asignacion.get('aulas_moviles', []))})")
             no_asignados = asignacion.get('no_asignados', {})
             if no_asignados:
-                self.logger.warning(f"Recursos no asignados por falta de disponibilidad: {no_asignados}")
+                self.logger.warning(f"Recursos no asignados: {no_asignados}")
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
