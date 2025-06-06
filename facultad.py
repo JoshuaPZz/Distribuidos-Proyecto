@@ -95,8 +95,8 @@ class Facultad:
     
     def enviar_solicitud_servidor(self, solicitud):
         inicio = time.time()
-        self.socket_servidor.send_json(solicitud)
         try:
+            self.socket_servidor.send_json(solicitud)
             respuesta = self.socket_servidor.recv_json()
             fin = time.time()
             tiempo_respuesta = fin - inicio
@@ -108,14 +108,16 @@ class Facultad:
         except zmq.Again:
             self.logger.warning("Timeout al esperar respuesta del servidor")
             self.fallos_consecutivos += 1
+            self.conectar_servidor()  # Reinicia el socket
             if self.fallos_consecutivos >= self.max_fallos and self.servidor_activo.endswith(f":{self.servidor_puerto}"):
                 self.logger.warning("Cambiando al servidor de respaldo")
                 self.servidor_activo = f"tcp://{self.servidor_ip}:{self.puerto_respaldo}"
                 self.conectar_servidor()
                 self.fallos_consecutivos = 0
-        except Exception as e:
+        except zmq.ZMQError as e:
             self.logger.error(f"Error enviando solicitud: {e}")
             self.fallos_consecutivos += 1
+            self.conectar_servidor()  # Reinicia el socket
             if self.fallos_consecutivos >= self.max_fallos and self.servidor_activo.endswith(f":{self.servidor_puerto}"):
                 self.logger.warning("Cambiando al servidor de respaldo")
                 self.servidor_activo = f"tcp://{self.servidor_ip}:{self.puerto_respaldo}"
